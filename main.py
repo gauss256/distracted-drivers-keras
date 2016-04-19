@@ -5,6 +5,8 @@ import os
 import time
 import pickle
 import numpy as np
+import sys
+import time
 
 from keras.models import Sequential
 from keras.optimizers import Adam
@@ -20,7 +22,8 @@ from utilities import write_submission, calc_geom, calc_geom_arr, mkdirp
 
 TESTING = False
 
-DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/data_20.pkl' if not TESTING else 'dataset/data_20_subset.pkl')
+DOWNSAMPLE = 20
+DATASET_PATH = os.environ.get('DATASET_PATH', 'dataset/data_%d.pkl' % DOWNSAMPLE if not TESTING else 'dataset/data_%d_subset.pkl' % DOWNSAMPLE)
 
 CHECKPOINT_PATH = os.environ.get('CHECKPOINT_PATH', 'checkpoints/')
 SUMMARY_PATH = os.environ.get('SUMMARY_PATH', 'summaries/')
@@ -31,19 +34,22 @@ mkdirp(SUMMARY_PATH)
 mkdirp(MODEL_PATH)
 
 NB_EPOCHS = 10 if not TESTING else 1
-MAX_FOLDS = 3
-DOWNSAMPLE = 20
+MAX_FOLDS = 5
 
 WIDTH, HEIGHT, NB_CHANNELS = 640 // DOWNSAMPLE, 480 // DOWNSAMPLE, 3
 BATCH_SIZE = 50
 
 with open(DATASET_PATH, 'rb') as f:
+    print('Reading training and test data')
     X_train_raw, y_train_raw, X_test, X_test_ids, driver_ids = pickle.load(f)
-_, driver_indices = np.unique(np.array(driver_ids), return_inverse=True)
+unique_driver_indices, driver_indices = np.unique(np.array(driver_ids), return_inverse=True)
+print('Number of unique driver indices = {}'.format(len(unique_driver_indices)))
+
+time_start = time.time()  # start timer for training
 
 predictions_total = [] # accumulated predictions from each fold
 scores_total = [] # accumulated scores from each fold
-num_folds = 0
+num_fold = 0
 
 def vgg_bn():
     model = Sequential()
@@ -73,30 +79,30 @@ def vgg_bn():
     return model
 
 for train_index, valid_index in LabelShuffleSplit(driver_indices, n_iter=MAX_FOLDS, test_size=0.2, random_state=67):
-    print('Fold {}/{}'.format(num_folds + 1, MAX_FOLDS))
-
-    # skip fold if a checkpoint exists for the next one
-    # next_checkpoint_path = os.path.join(CHECKPOINT_PATH, 'model_{}.h5'.format(num_folds + 1))
-    # if os.path.exists(next_checkpoint_path):
-    #     print('Checkpoint exists for next fold, skipping current fold.')
-    #     continue
+    print('Fold {}/{}'.format(num_fold, MAX_FOLDS - 1))
 
     X_train, y_train = X_train_raw[train_index,...], y_train_raw[train_index,...]
     X_valid, y_valid = X_train_raw[valid_index,...], y_train_raw[valid_index,...]
 
     model = vgg_bn()
 
-    model_path = os.path.join(MODEL_PATH, 'model_{}.json'.format(num_folds))
+    model_path = os.path.join(MODEL_PATH, 'model_{}.json'.format(num_fold))
     with open(model_path, 'w') as f:
+        print('Writing model to {}'.format(model_path))
         f.write(model.to_json())
 
+    #!!! This doesn't make sense to me. Why restore a previous model?
+    '''
     # restore existing checkpoint, if it exists
-    checkpoint_path = os.path.join(CHECKPOINT_PATH, 'model_{}.h5'.format(num_folds))
+    checkpoint_path = os.path.join(CHECKPOINT_PATH, 'model_{}.h5'.format(num_fold))
     if os.path.exists(checkpoint_path):
-        print('Restoring fold from checkpoint.')
+        print('Restoring model from fold checkpoint {}'.format(checkpoint_path))
         model.load_weights(checkpoint_path)
+    '''
+    checkpoint_path = os.path.join(CHECKPOINT_PATH, 'model_{}.h5'.format(num_fold))
+    #!!!
 
-    summary_path = os.path.join(SUMMARY_PATH, 'model_{}'.format(num_folds))
+    summary_path = os.path.join(SUMMARY_PATH, 'model_{}'.format(num_fold))
     mkdirp(summary_path)
 
     callbacks = [
@@ -110,20 +116,34 @@ for train_index, valid_index in LabelShuffleSplit(driver_indices, n_iter=MAX_FOL
             verbose=1, \
             validation_data=(X_valid, y_valid), \
             callbacks=callbacks)
+    
+    #!!! EXPERIMENTAL: Use the best model
+    best_model = vgg_bn()
+    if os.path.exists(checkpoint_path):
+        print('Restoring best model from checkpoint {}'.format(checkpoint_path))
+        best_model.load_weights(checkpoint_path)
+    model = best_model
+    #!!!
 
     predictions_valid = model.predict(X_valid, batch_size=100, verbose=1)
     score_valid = log_loss(y_valid, predictions_valid)
     scores_total.append(score_valid)
 
-    print('Score: {}'.format(score_valid))
+    print('Score: {:.3}'.format(score_valid))
 
+    print('Calculating predictions on test set')
     predictions_test = model.predict(X_test, batch_size=100, verbose=1)
     predictions_total.append(predictions_test)
 
-    num_folds += 1
+    num_fold += 1
+    print('')
 
 score_geom = calc_geom(scores_total, MAX_FOLDS)
+print('Combined score = {:.4}'.format(score_geom))
 predictions_geom = calc_geom_arr(predictions_total, MAX_FOLDS)
+
+time_end = time.time()  # end timer for training time
+print('Elapsed time: %.1f s' % float(time_end - time_start))
 
 submission_path = os.path.join(SUMMARY_PATH, 'submission_{}_{:.2}.csv'.format(int(time.time()), score_geom))
 write_submission(predictions_geom, X_test_ids, submission_path)
