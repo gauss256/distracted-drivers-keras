@@ -9,3 +9,4 @@ dataset/*.zip
 checkpoints/
 summaries/
 models/
+/nohup.out
